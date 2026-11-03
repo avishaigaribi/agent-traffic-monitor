@@ -1,6 +1,7 @@
 # SPEC: Agent Traffic Dashboard
 
-> Status: **DRAFT v0.2**. All open decisions in §11 are settled.
+> Status: **DRAFT v0.3**. All open decisions in §11 are settled. v0.3 adds the
+> Session Statistics bar (§5.0).
 
 ## 1. Purpose
 
@@ -15,7 +16,8 @@ so you can tell at a glance:
 - what the model replied (text, thinking, tool calls),
 - which tool result goes with which tool call,
 - what changed since the last request,
-- where something went wrong.
+- where something went wrong,
+- how much the session has used so far (requests, tokens, time waiting on the model).
 
 ## 2. Users and use
 
@@ -62,6 +64,12 @@ just print it. Rules:
     or disconnected browser drops events for itself only; it never blocks the
     relay thread.
   - On startup the proxy also prints the dashboard URL.
+- **R3.6 Session totals are kept by the proxy.** The proxy maintains running
+  totals for the Session Statistics bar (§5.0) and sends them as a `stats`
+  event on every change, and as a snapshot when a page connects or reconnects.
+  Totals are updated from the same events as R3.2, are not reduced when old
+  exchanges are dropped by the history cap (R9.5), and reset only on "Clear"
+  or a proxy restart.
 
 ## 4. Data model (what the dashboard understands)
 
@@ -97,6 +105,8 @@ they fail (§8), even when dimmed.
 
 ```
 ┌───────────────────────────────────────────────────────────────────────────┐
+│ SESSION  Requests 42  |  Tokens in 612.4k · out 18.9k  |  Model time 3m 12s│
+├───────────────────────────────────────────────────────────────────────────┤
 │ ● Live  |  Filter: [tool ▾] [status ▾] [search ...]  |  ⏸ Pause  | Clear │
 ├──────────────────────────────┬────────────────────────────────────────────┤
 │ TIMELINE (newest first)      │ DETAIL of selected exchange                │
@@ -116,8 +126,9 @@ they fail (§8), even when dimmed.
 └──────────────────────────────┴────────────────────────────────────────────┘
 ```
 
-**Decided: two panes**, as above. The timeline on the left is a compact list;
-selecting a row shows that exchange's full detail on the right.
+**Decided: two panes**, as above, under two full-width bars at the very top: the
+Session Statistics bar (§5.0), then the control bar. The timeline on the left is
+a compact list; selecting a row shows that exchange's full detail on the right.
 
 - **R5.0a** The newest exchange is auto-selected only while the user has not
   picked one; once they select a row, the selection stays put (see R5.5).
@@ -125,6 +136,43 @@ selecting a row shows that exchange's full detail on the right.
   returns to following the newest exchange.
 - **R5.0c** The divider between the panes can be dragged. On narrow screens
   (< ~900px) the panes stack: list on top, detail below.
+
+### 5.0 Session Statistics bar
+
+A slim, full-width bar at the very top of the page, above the control bar. It
+shows live aggregates for the current session (everything since the proxy
+started or since the last "Clear"), and updates as traffic flows.
+
+| Stat | Definition |
+|---|---|
+| **Requests** | Count of exchanges to the Messages API (`POST /v1/messages`). Non-message calls (§4) are not counted. Counted when the request arrives, so in-flight requests are included. |
+| **Tokens in / out** | Sum of `usage` over all replies. **In** = `input_tokens` + `cache_creation_input_tokens` + `cache_read_input_tokens`; **out** = `output_tokens`. Hovering **In** shows the split (uncached / cache write / cache read). |
+| **Model time** | Cumulative wait for the model: the sum, over all message exchanges, of the time from the request being forwarded upstream to `response_end`. |
+
+- **R5.0.1 Live.** Values update while replies stream. Output tokens use the
+  running `usage` from `message_delta` events; input tokens are taken from
+  `message_start`. An exchange still in flight adds its elapsed time so far, so
+  **Model time** ticks up while a reply is pending (about once a second).
+- **R5.0.2 Overlap.** Model time is a *sum of per-exchange durations*, not wall
+  clock. Parallel requests (e.g. subagents) overlap, so it can exceed the
+  elapsed session time. The bar's tooltip says so.
+- **R5.0.3 Failed exchanges.** Exchanges that error before any `usage` arrives
+  count toward Requests and Model time but add 0 tokens. Streams cut short
+  count whatever `usage` was received.
+- **R5.0.4 Not filtered.** Filters, search, hiding non-message calls, and Pause
+  (R5.6) do not change the bar; it always describes the whole session. (Pause
+  only freezes the display of the bar along with the rest of the view and
+  catches up on resume.)
+- **R5.0.5 Survives history cap and reload.** Values come from the proxy's
+  running totals (R3.6), so dropping old exchanges (R9.5) or reloading the page
+  does not change them. "Clear" resets all three to zero.
+- **R5.0.6 Formatting.** Counts are shown compactly (`1,204`, `612.4k`, `1.2M`);
+  full exact numbers appear in a tooltip. Durations show as `850ms`, `42s`,
+  `3m 12s`, `1h 04m`. Numbers use tabular figures so the bar does not jitter.
+- **R5.0.7 Layout.** The bar stays visible when the panes scroll. On narrow
+  screens it wraps to two lines rather than scrolling sideways. It works in
+  light and dark mode (R6.7).
+- **R5.0.8 Empty state.** Before any traffic: `0`, `0 / 0`, `0s`, not blank.
 
 ### 5.1 Timeline (one row per exchange)
 
@@ -285,7 +333,8 @@ them.
 
 - Changing, blocking, or replaying requests.
 - Multiple users, login, remote access.
-- Cost accounting in dollars.
+- Cost accounting in dollars (the Session Statistics bar shows tokens and time
+  only).
 - Long-term storage / analytics across sessions.
 
 ## 11. Open decisions
