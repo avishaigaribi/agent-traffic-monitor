@@ -5,6 +5,9 @@
 :root{--bg:#fff;--fg:#1d2024;--mut:#6b7280;--bd:#d9dce1;--pn:#f5f6f8;--sel:#e3edff;--err:#c62828;--warn:#b26a00;--ok:#2e7d32;--sys:#7b3fb0;--tool:#0b7a75;--usr:#1c5fc4;--ast:#a8541b;--thk:#777}
 @media(prefers-color-scheme:dark){:root{--bg:#16181c;--fg:#e4e6ea;--mut:#9aa0a8;--bd:#30343b;--pn:#1e2126;--sel:#25344f;--err:#ff6b6b;--warn:#ffb74d;--ok:#6fcf74;--sys:#c49bef;--tool:#4fd1c7;--usr:#7fb0ff;--ast:#f0a574;--thk:#999}}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px system-ui,sans-serif;height:100vh;display:flex;flex-direction:column}
+#stats{display:flex;flex-wrap:wrap;gap:4px 18px;align-items:baseline;padding:5px 10px;border-bottom:1px solid var(--bd);background:var(--pn);font-variant-numeric:tabular-nums;position:sticky;top:0;z-index:5}
+#stats b.h{color:var(--mut);font-size:11px;letter-spacing:.05em}#stats .v{font-weight:600}#stats .sep{color:var(--bd)}
+#stats [title]{cursor:help}
 #bar{display:flex;gap:10px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--bd);flex-wrap:wrap}
 #bar input,#bar select,#bar button{font:inherit;background:var(--pn);color:var(--fg);border:1px solid var(--bd);border-radius:4px;padding:3px 6px}
 #banner{display:none;background:var(--err);color:#fff;padding:4px 10px}
@@ -32,6 +35,10 @@ a.lnk{color:var(--usr);cursor:pointer;text-decoration:underline}
 .jk{color:var(--usr)}.js{color:var(--ok)}.jn{color:var(--warn)}
 </style></head><body>
 <div id="banner">Connection to proxy lost — reconnecting…</div>
+<div id="stats"><b class="h">SESSION</b>
+<span id="sReq" title="Messages API requests (POST /v1/messages), including in-flight ones">Requests <span class="v">0</span></span><span class="sep">|</span>
+<span>Tokens <span id="sIn" title="">in <span class="v">0</span></span> · <span id="sOut" title="">out <span class="v">0</span></span></span><span class="sep">|</span>
+<span id="sTime" title="">Model time <span class="v">0s</span></span></div>
 <div id="bar">
 <b id="live">● Live</b>
 <select id="fTool"><option value="">tool: any</option></select>
@@ -309,11 +316,27 @@ function refreshFilters(){
 }
 ['fTool','fStat','fModel','fConv','fText','fHide'].forEach(id=>$(id).addEventListener('input',()=>{listDirty=true;if(!passes(X[sel]||{req:{path:''},msg:0}))following=true;flush()}));
 $('errc').onclick=()=>{$('fStat').value='err';listDirty=true;flush()};
-$('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'▶ Resume':'⏸ Pause';$('live').textContent=paused?'⏸ Paused':'● Live';if(!paused){listDirty=true;order.forEach(n=>dirty.add(n));flush()}};
+$('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'▶ Resume':'⏸ Pause';$('live').textContent=paused?'⏸ Paused':'● Live';if(!paused){listDirty=true;order.forEach(n=>dirty.add(n));flush();renderStats()}};
 $('clear').onclick=()=>{fetch('/__dashboard/clear',{method:'POST'}).catch(()=>{});resetAll()};
-function resetAll(){for(const k in X)delete X[k];order=[];convs=[];sel=null;following=true;dropped=0;listDirty=true;$('detail').innerHTML='';flush()}
+function resetAll(){S={requests:0,in_uncached:0,cache_write:0,cache_read:0,out:0,model_time:0,inflight:0,inflight_starts:0};renderStats();for(const k in X)delete X[k];order=[];convs=[];sel=null;following=true;dropped=0;listDirty=true;$('detail').innerHTML='';flush()}
 // divider
 $('div').onmousedown=e=>{const mv=ev=>{$('list').style.width=Math.max(200,ev.clientX)+'px'};const up=()=>{removeEventListener('mousemove',mv);removeEventListener('mouseup',up)};addEventListener('mousemove',mv);addEventListener('mouseup',up)};
+// ---------- session statistics ----------
+let S={requests:0,in_uncached:0,cache_write:0,cache_read:0,out:0,model_time:0,inflight:0,inflight_starts:0},skew=0;
+const fmtN=n=>n<10000?Math.round(n).toLocaleString('en-US'):n<1e6?(n/1e3).toFixed(1)+'k':(n/1e6).toFixed(1)+'M';
+function fmtD(s){const ms=s*1000;if(ms<1000)return Math.round(ms)+'ms';s=Math.floor(s);if(s<60)return s+'s';
+  const m=Math.floor(s/60);if(m<60)return m+'m '+String(s%60).padStart(2,'0')+'s';const h=Math.floor(m/60);return h+'h '+String(m%60).padStart(2,'0')+'m'}
+function renderStats(){
+  const nowS=Date.now()/1000+skew,mt=S.model_time+S.inflight*nowS-S.inflight_starts;
+  const tin=S.in_uncached+S.cache_write+S.cache_read,L=n=>n.toLocaleString('en-US');
+  $('sReq').querySelector('.v').textContent=fmtN(S.requests);$('sReq').querySelector('.v').title=L(S.requests);
+  const i=$('sIn');i.querySelector('.v').textContent=fmtN(tin);
+  i.title=`Input tokens ${L(tin)}\nuncached: ${L(S.in_uncached)}\ncache write: ${L(S.cache_write)}\ncache read: ${L(S.cache_read)}`;
+  $('sOut').querySelector('.v').textContent=fmtN(S.out);$('sOut').title=`Output tokens ${L(S.out)}`;
+  const t=$('sTime');t.querySelector('.v').textContent=fmtD(Math.max(0,mt));
+  t.title=`${mt.toFixed(1)}s. Sum of per-request durations (forward to end of reply), not wall-clock time; parallel requests overlap, so it can exceed elapsed session time.`;
+}
+setInterval(()=>{if(!paused)renderStats()},1000);
 // ---------- SSE ----------
 let dropped=0,es;
 function connect(){
@@ -321,6 +344,7 @@ function connect(){
   es.onopen=()=>{$('banner').style.display='none'};
   es.onmessage=m=>{const ev=JSON.parse(m.data);
     if(ev.type==='hello'){dropped=ev.dropped;return}
+    if(ev.type==='stats'){S=ev;skew=ev.now-Date.now()/1000;if(!paused)renderStats();return}
     if(ev.type==='cleared'){resetAll();return}
     const wasNew=!X[ev.ex];onEvent(ev);
     if(following)sel=order[order.length-1];

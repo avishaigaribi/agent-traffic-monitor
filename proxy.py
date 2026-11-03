@@ -24,6 +24,7 @@ import json
 import itertools
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -56,6 +57,75 @@ class Hub:
         self.next_id = 1
         self.next_ex = 1
         self.subs: list[queue.Queue] = []
+        self.reset_stats()
+
+    # ---- session statistics (SPEC §3.6, §5.0); all callers hold no lock ----
+    def reset_stats(self) -> None:
+        self.stats = {"requests": 0, "in_uncached": 0, "cache_write": 0, "cache_read": 0,
+                      "out": 0, "model_time": 0.0}
+        self.sx: dict[int, dict] = {}  # per message-exchange: start time + usage counted so far
+
+    def _snapshot(self) -> dict:
+        starts = [s["start"] for s in self.sx.values() if s["start"] is not None]
+        return {"id": 0, "type": "stats", **self.stats, "inflight": len(starts),
+                "inflight_starts": sum(starts), "now": time.time()}
+
+    def _emit_stats(self) -> None:  # call with lock held; not stored in history
+        ev = self._snapshot()
+        for q in self.subs:
+            try:
+                q.put_nowait(ev)
+            except queue.Full:
+                pass
+
+    def stat_begin(self, ex: int) -> None:
+        try:
+            with self.lock:
+                self.sx[ex] = {"start": None, "usage": {}, "c": (0, 0, 0, 0)}
+                self.stats["requests"] += 1
+                self._emit_stats()
+        except Exception:
+            pass
+
+    def stat_forward(self, ex: int) -> None:
+        try:
+            with self.lock:
+                if ex in self.sx:
+                    self.sx[ex]["start"] = time.time()
+                    self._emit_stats()
+        except Exception:
+            pass
+
+    def stat_usage(self, ex: int, usage: dict) -> None:
+        try:
+            with self.lock:
+                s = self.sx.get(ex)
+                if s is None or not isinstance(usage, dict):
+                    return
+                s["usage"].update({k: v for k, v in usage.items() if isinstance(v, int)})
+                u = s["usage"]
+                c = (u.get("input_tokens", 0), u.get("cache_creation_input_tokens", 0),
+                     u.get("cache_read_input_tokens", 0), u.get("output_tokens", 0))
+                if c == s["c"]:
+                    return
+                for key, new, old in zip(("in_uncached", "cache_write", "cache_read", "out"), c, s["c"]):
+                    self.stats[key] += new - old
+                s["c"] = c
+                self._emit_stats()
+        except Exception:
+            pass
+
+    def stat_end(self, ex: int) -> None:  # idempotent
+        try:
+            with self.lock:
+                s = self.sx.pop(ex, None)
+                if s is None:
+                    return
+                if s["start"] is not None:
+                    self.stats["model_time"] += time.time() - s["start"]
+                self._emit_stats()
+        except Exception:
+            pass
 
     def new_exchange(self) -> int:
         with self.lock:
@@ -87,6 +157,7 @@ class Hub:
         q: queue.Queue = queue.Queue(maxsize=20000)
         with self.lock:
             q.put_nowait({"id": 0, "type": "hello", "dropped": self.dropped})
+            q.put_nowait(self._snapshot())
             for e in self.events:
                 if e["id"] > last_id:
                     q.put_nowait(e)
@@ -103,14 +174,51 @@ class Hub:
             self.events = []
             self.order = []
             self.dropped = 0
+            self.reset_stats()
             for q in self.subs:
                 try:
                     q.put_nowait({"id": 0, "type": "cleared"})
                 except queue.Full:
                     pass
+            self._emit_stats()
 
 
 HUB = Hub()
+
+MSG_PATH = re.compile(r"^/v1/messages(\?|$)")
+
+
+class UsageTap:
+    """Reads token usage out of a reply as it streams past (observer only)."""
+
+    def __init__(self, ex: int) -> None:
+        self.ex, self.buf, self.raw, self.sse = ex, "", "", False
+
+    def feed(self, text: str) -> None:
+        try:
+            if not self.sse and len(self.raw) < 5_000_000:
+                self.raw += text
+            self.buf += text
+            while (i := self.buf.find("\n\n")) >= 0:
+                chunk, self.buf = self.buf[:i], self.buf[i + 2:]
+                data = "".join(l[5:].strip() for l in chunk.split("\n") if l.startswith("data:"))
+                if not data:
+                    continue
+                j = json.loads(data)
+                self.sse = True
+                if j.get("type") == "message_start":
+                    HUB.stat_usage(self.ex, (j.get("message") or {}).get("usage"))
+                elif j.get("type") == "message_delta":
+                    HUB.stat_usage(self.ex, j.get("usage"))
+        except Exception:
+            pass
+
+    def finish(self) -> None:
+        if not self.sse:
+            try:
+                HUB.stat_usage(self.ex, json.loads(self.raw).get("usage"))
+            except Exception:
+                pass
 
 
 def mask(name: str, value: str) -> str:
@@ -204,6 +312,16 @@ class Tap(BaseHTTPRequestHandler):
                     headers={k: mask(k, v) for k, v in self.headers.items()},
                     body=parsed, body_text=None if parsed is not None else body.decode("utf-8", "replace"))
 
+        is_msg = (self.command == "POST" and MSG_PATH.match(self.path) is not None
+                  and isinstance(parsed, dict) and "messages" in parsed)
+        if is_msg:
+            HUB.stat_begin(ex)
+        try:
+            self.forward(ex, t0, body, is_msg)
+        finally:
+            HUB.stat_end(ex)
+
+    def forward(self, ex: int, t0: float, body: bytes, is_msg: bool) -> None:
         # 1. Print what the agent sent.
         print(f"\n{'=' * 78}\n[{stamp()}] >>> {self.command} {self.path}", flush=True)
         for name, value in self.headers.items():
@@ -230,6 +348,7 @@ class Tap(BaseHTTPRequestHandler):
             return
         upstream.sock.settimeout(600)
         headers = {k: v for k, v in self.headers.items() if k.lower() not in SKIP}
+        HUB.stat_forward(ex)
         try:
             upstream.request(self.command, target.path.rstrip("/") + self.path, body=body or None, headers=headers)
             reply = upstream.getresponse()
@@ -252,16 +371,23 @@ class Tap(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         size = 0
+        tap = UsageTap(ex) if is_msg else None
         try:
             while chunk := reply.read1(4096):  # read1: pass on each chunk as it lands, don't wait for 4096 bytes
                 self.wfile.write(chunk)
                 self.wfile.flush()
                 size += len(chunk)
-                HUB.publish(ex, "response_chunk", text=chunk.decode("utf-8", "replace"))
+                text = chunk.decode("utf-8", "replace")
+                HUB.publish(ex, "response_chunk", text=text)
+                if tap:
+                    tap.feed(text)
                 sys.stdout.write(chunk.decode("utf-8", "replace"))
                 sys.stdout.flush()
         except OSError as e:
             HUB.publish(ex, "error", message=f"stream broken: {e}")
+        if tap:
+            tap.finish()
+        HUB.stat_end(ex)  # before response_end so the stats are final when the page sees it
         HUB.publish(ex, "response_end", duration=time.time() - t0, size=size)
         self.close_connection = True
         print(f"\n[{stamp()}] --- done", flush=True)
