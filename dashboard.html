@@ -1,0 +1,332 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent Traffic</title>
+<style>
+:root{--bg:#fff;--fg:#1d2024;--mut:#6b7280;--bd:#d9dce1;--pn:#f5f6f8;--sel:#e3edff;--err:#c62828;--warn:#b26a00;--ok:#2e7d32;--sys:#7b3fb0;--tool:#0b7a75;--usr:#1c5fc4;--ast:#a8541b;--thk:#777}
+@media(prefers-color-scheme:dark){:root{--bg:#16181c;--fg:#e4e6ea;--mut:#9aa0a8;--bd:#30343b;--pn:#1e2126;--sel:#25344f;--err:#ff6b6b;--warn:#ffb74d;--ok:#6fcf74;--sys:#c49bef;--tool:#4fd1c7;--usr:#7fb0ff;--ast:#f0a574;--thk:#999}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:13px system-ui,sans-serif;height:100vh;display:flex;flex-direction:column}
+#bar{display:flex;gap:10px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--bd);flex-wrap:wrap}
+#bar input,#bar select,#bar button{font:inherit;background:var(--pn);color:var(--fg);border:1px solid var(--bd);border-radius:4px;padding:3px 6px}
+#banner{display:none;background:var(--err);color:#fff;padding:4px 10px}
+#main{flex:1;display:flex;min-height:0}
+#list{width:42%;min-width:220px;overflow:auto;position:relative}
+#div{width:5px;cursor:col-resize;background:var(--bd)}
+#detail{flex:1;overflow:auto;padding:10px 14px;min-width:0}
+@media(max-width:900px){#main{flex-direction:column}#list{width:100%;height:40%}#div{display:none}}
+.row{padding:5px 10px;border-bottom:1px solid var(--bd);cursor:pointer;border-left:4px solid var(--c,transparent)}
+.row:hover{background:var(--pn)}.row.sel{background:var(--sel)}.row.dim{opacity:.55;font-size:12px}
+.row .l1{display:flex;gap:8px;flex-wrap:wrap}.chip{background:var(--pn);border:1px solid var(--bd);border-radius:9px;padding:0 6px;font-size:11px;margin-right:3px}
+.err{color:var(--err);font-weight:600}.warn{color:var(--warn)}.ok{color:var(--ok)}.mut{color:var(--mut)}
+#newb{position:sticky;top:0;display:none;background:var(--usr);color:#fff;text-align:center;padding:3px;cursor:pointer}
+details{border:1px solid var(--bd);border-left:4px solid var(--c,var(--bd));border-radius:4px;margin:8px 0;background:var(--bg)}
+details>summary{cursor:pointer;padding:5px 8px;background:var(--pn);font-weight:600}
+details>summary .sm{font-weight:400;color:var(--mut);margin-left:8px}
+.body{padding:6px 8px}
+pre{margin:4px 0;white-space:pre-wrap;word-break:break-word;font:12px ui-monospace,Menlo,monospace}
+.blk{border-left:3px solid var(--c,var(--bd));padding:2px 8px;margin:6px 0;background:var(--pn);border-radius:3px}
+.blk>.t{font-size:11px;font-weight:700;color:var(--c);text-transform:uppercase}
+.pair{display:flex;gap:8px;flex-wrap:wrap}.pair>div{flex:1 1 300px;min-width:0}
+button.s{font-size:11px;padding:0 5px;margin-left:4px;cursor:pointer;background:var(--pn);color:var(--fg);border:1px solid var(--bd);border-radius:3px}
+.diffa{background:rgba(46,125,50,.2)}.diffd{background:rgba(198,40,40,.2)}
+a.lnk{color:var(--usr);cursor:pointer;text-decoration:underline}
+.jk{color:var(--usr)}.js{color:var(--ok)}.jn{color:var(--warn)}
+</style></head><body>
+<div id="banner">Connection to proxy lost — reconnecting…</div>
+<div id="bar">
+<b id="live">● Live</b>
+<select id="fTool"><option value="">tool: any</option></select>
+<select id="fStat"><option value="">status: any</option><option value="err">errors</option><option value="stream">streaming</option><option value="toolerr">tool errors</option></select>
+<select id="fModel"><option value="">model: any</option></select>
+<select id="fConv"><option value="">conv: any</option></select>
+<input id="fText" placeholder="search…">
+<label><input type="checkbox" id="fHide"> Hide non-message calls</label>
+<label><input type="checkbox" id="mdDef"> Markdown default</label>
+<button id="pause">⏸ Pause</button><button id="clear">Clear</button>
+<span id="errc" class="err" style="cursor:pointer"></span><span id="dropped" class="mut"></span>
+</div>
+<div id="main"><div id="list"><div id="newb"></div><div id="rows"></div></div><div id="div"></div><div id="detail"><span class="mut">Waiting for traffic… (↑/↓ or j/k to move, Esc to follow newest)</span></div></div>
+<script>
+"use strict";
+const $=id=>document.getElementById(id);
+const X={}; // exchanges by n
+let order=[]; // ascending
+let convs=[]; // {label,color,last:{messages,reply},count,exs:[]}
+let sel=null, paused=false, pending=0, dirty=new Set(), listDirty=true;
+const COLORS=['#1c5fc4','#a8541b','#0b7a75','#7b3fb0','#b26a00','#c2185b','#558b2f','#00838f'];
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const str=v=>typeof v==='string'?v:JSON.stringify(v);
+const strip=v=>JSON.stringify(v,(k,x)=>k==='cache_control'?undefined:x);
+const tok=n=>n>=1000?(n/1000).toFixed(1)+'k':String(n);
+const isMsg=e=>e.method==='POST'&&/^\/v1\/messages(\?|$)/.test(e.path)&&e.body&&e.body.messages;
+
+// ---------- event handling ----------
+function ensure(n){return X[n]||(X[n]={n,t:0,req:null,status:null,chunks:[],buf:'',reply:null,rawReply:'',done:false,err:null,dur:null,size:0,blocks:{},usage:{},stop:null,streamErr:null,model:null})}
+function onEvent(ev){
+  const x=ensure(ev.ex);
+  if(ev.type==='request'){x.req=ev;x.t=ev.ts;if(!order.includes(ev.ex)){order.push(ev.ex);order.sort((a,b)=>a-b)}
+    x.msg=isMsg(ev); x.model=x.msg?ev.body.model:null; if(x.msg)assignConv(x);}
+  else if(ev.type==='response_start'){x.status=ev.status;x.rh=ev.headers}
+  else if(ev.type==='response_chunk'){x.rawReply+=ev.text;parseSSE(x,ev.text)}
+  else if(ev.type==='response_end'){x.done=true;x.dur=ev.duration;x.size=ev.size;finishReply(x)}
+  else if(ev.type==='error'){x.err=ev.message;x.done=true;if(ev.status)x.status=ev.status}
+  dirty.add(ev.ex);listDirty=true;schedule();
+}
+function parseSSE(x,text){
+  x.buf+=text;let i;
+  while((i=x.buf.indexOf('\n\n'))>=0){const raw=x.buf.slice(0,i);x.buf=x.buf.slice(i+2);
+    const d=raw.split('\n').filter(l=>l.startsWith('data:')).map(l=>l.slice(5).trim()).join('');
+    if(!d)continue;let j;try{j=JSON.parse(d)}catch{continue}x.sse=true;
+    switch(j.type){
+      case'message_start':x.usage={...x.usage,...(j.message.usage||{})};x.model=j.message.model||x.model;break;
+      case'content_block_start':x.blocks[j.index]={...j.content_block,_json:''};break;
+      case'content_block_delta':{const b=x.blocks[j.index];if(!b)break;const d2=j.delta;
+        if(d2.type==='text_delta')b.text=(b.text||'')+d2.text;
+        else if(d2.type==='thinking_delta')b.thinking=(b.thinking||'')+d2.thinking;
+        else if(d2.type==='input_json_delta')b._json+=d2.partial_json;
+        else if(d2.type==='signature_delta')b.signature=d2.signature;break}
+      case'message_delta':if(j.delta&&j.delta.stop_reason)x.stop=j.delta.stop_reason;x.usage={...x.usage,...(j.usage||{})};break;
+      case'message_stop':x.stopped=true;break;
+      case'error':x.streamErr=j.error&&j.error.message||'stream error';break;
+    }}
+}
+function replyContent(x){
+  return Object.keys(x.blocks).sort((a,b)=>a-b).map(k=>{const b={...x.blocks[k]};
+    if(b.type==='tool_use'){try{b.input=b._json?JSON.parse(b._json):(b.input||{})}catch{b.input={_partial:b._json}}}
+    delete b._json;return b});
+}
+function finishReply(x){
+  if(x.sse){x.reply=replyContent(x);if(x.msg&&!x.stopped&&!x.streamErr&&x.status===200)x.streamErr='stream ended early'}
+  else if(x.msg&&x.status===200){try{const j=JSON.parse(x.rawReply);x.reply=j.content;x.stop=j.stop_reason;x.usage=j.usage||{}}catch{}}
+  if(x.conv&&x.reply){x.conv.last={messages:x.req.body.messages,reply:x.reply}}
+}
+// ---------- conversations ----------
+function assignConv(x){
+  const M=x.req.body.messages.map(m=>strip(m));let best=null,bl=0,share=null,sl=0;
+  for(const c of convs){const L=c.lastM;if(!L)continue;let k=0;while(k<L.length&&k<M.length&&L[k]===M[k])k++;
+    if(k===L.length&&M.length>L.length&&k>bl){best=c;bl=k}
+    if(k>sl){sl=k;share=c}}
+  if(!best){best={label:'',color:COLORS[convs.length%COLORS.length],exs:[],id:convs.length};convs.push(best);
+    if(share&&sl>0&&M.length>1){best.branch=`branched from ${share.label||'#'+share.id} at message ${sl}`;x.branched=true}}
+  x.conv=best;x.prev=best.exs.length?X[best.exs[best.exs.length-1]]:null;
+  best.exs.push(x.n);best.lastM=M;best.last=null;
+  relabel();
+}
+function relabel(){
+  const sorted=[...convs].sort((a,b)=>b.exs.length-a.exs.length);let s=0,sub=0;
+  sorted.forEach((c,i)=>{if(i===0&&c.exs.length>1||(i===0&&convs.length===1))c.label='main';
+    else if(c.exs.length===1&&X[c.exs[0]].req.body.messages.length<=1)c.label='side-'+(++s);
+    else c.label='sub-'+(++sub)});
+  if(sorted[0]&&sorted[0].exs.length>=1&&!sorted.some(c=>c.label==='main'))sorted[0].label='main';
+}
+// ---------- derived ----------
+function toolsCalled(x){return (x.reply||[]).filter(b=>b.type==='tool_use')}
+function resultsIn(x){const o=[];if(!x.msg)return o;for(const m of x.req.body.messages)if(Array.isArray(m.content))for(const b of m.content)if(b.type==='tool_result')o.push(b);return o}
+function toolErrIn(x){return resultsIn(x).some(b=>b.is_error)}
+function isErr(x){return x.err||x.streamErr||(x.status&&x.status>=400)}
+function findResult(id,x){ // result for tool_use id, searching later exs in same conv
+  if(!x.conv)return null;const i=x.conv.exs.indexOf(x.n);
+  for(let k=i+1;k<x.conv.exs.length;k++){const y=X[x.conv.exs[k]];for(const b of resultsIn(y))if(b.tool_use_id===id)return{b,y}}return null}
+function findCall(id,x){ // the call for a result, in earlier ex
+  if(!x.conv)return null;const i=x.conv.exs.indexOf(x.n);
+  for(let k=i-1;k>=0;k--){const y=X[x.conv.exs[k]];for(const b of toolsCalled(y))if(b.id===id)return{b,y}}return null}
+function searchText(x){if(x._s)return x._s;let s=x.req.path+' ';try{s+=JSON.stringify(x.req.body||x.req.body_text||'')}catch{}return x._s=(s+JSON.stringify(x.reply||'')).toLowerCase()}
+function passes(x){
+  if($('fHide').checked&&!x.msg)return false;
+  const t=$('fTool').value,st=$('fStat').value,m=$('fModel').value,cv=$('fConv').value,q=$('fText').value.toLowerCase();
+  if(t&&!(toolsCalled(x).some(b=>b.name===t)||resultsIn(x).some(b=>{const c=findCall(b.tool_use_id,x);return c&&c.b.name===t})))return false;
+  if(st==='err'&&!(isErr(x)||toolErrIn(x)))return false;
+  if(st==='stream'&&x.done)return false;
+  if(st==='toolerr'&&!toolErrIn(x))return false;
+  if(m&&x.model!==m)return false;
+  if(cv&&(!x.conv||x.conv.label!==cv))return false;
+  if(q&&!(x.msg?searchText(x):x.req.path.toLowerCase()).includes(q))return false;
+  return true;
+}
+// ---------- rendering: list ----------
+let raf=0;function schedule(){if(!raf)raf=requestAnimationFrame(()=>{raf=0;flush()})}
+function flush(){
+  if(paused){pending=dirty.size;$('pause').textContent=`▶ Resume (${pending} updated)`;return}
+  refreshFilters();
+  if(listDirty){renderList();listDirty=false}
+  if(sel==null&&order.length)selectEx(order[order.length-1],true);
+  else if(sel!=null&&dirty.has(sel))renderDetail();
+  else if(sel!=null&&dirty.size&&following){}
+  dirty.clear();
+  const ec=order.filter(n=>{const x=X[n];return isErr(x)||toolErrIn(x)}).length;
+  $('errc').textContent=ec?`⚠ ${ec} errors`:'';
+}
+let following=true;
+function rowHTML(x){
+  const dim=!x.msg,time=new Date(x.t*1000).toLocaleTimeString();
+  let st;
+  if(x.err)st='<span class="err">✖ '+esc(x.err.slice(0,60))+'</span>';
+  else if(!x.done&&x.status==null)st='<span class="mut">⟳ waiting…</span>';
+  else if(!x.done)st='<span class="mut">⟳ streaming… '+(x.usage.output_tokens||0)+' tok</span>';
+  else if(x.status>=400)st=`<span class="err">✖ ${x.status}</span>`;
+  else if(x.streamErr)st=`<span class="err">✖ ${esc(x.streamErr)}</span>`;
+  else st=`<span class="ok">✓ ${x.status}</span>`;
+  const extra=(toolErrIn(x)?' <span class="err">⚠ tool error</span>':'')+(x.stop==='max_tokens'?' <span class="warn">⚠ max_tokens</span>':'');
+  const dur=x.dur!=null?x.dur.toFixed(1)+'s':'';
+  if(dim)return `<div class="row dim ${x.n===sel?'sel':''}" data-n="${x.n}">#${x.n} ${time} ${esc(x.req.method)} ${esc(x.req.path)} ${st} ${dur}</div>`;
+  const chips=toolsCalled(x).map(b=>`<span class="chip">${esc(b.name)}</span>`).join('');
+  const u=x.usage||{};const inTok=(u.input_tokens||0)+(u.cache_read_input_tokens||0)+(u.cache_creation_input_tokens||0);
+  return `<div class="row ${x.n===sel?'sel':''}" data-n="${x.n}" style="--c:${x.conv.color}"><div class="l1"><b>#${x.n}</b><span class="mut">${time}</span><span>${esc((x.model||'').replace(/^claude-/,''))}</span>${st}<span class="mut">${dur}</span>${inTok||u.output_tokens?`<span class="mut">in ${tok(inTok)} / out ${tok(u.output_tokens||0)}</span>`:''}<span class="chip" style="color:${x.conv.color}">${x.conv.label}</span>${extra}</div><div>${chips}</div></div>`;
+}
+function renderList(){
+  const list=$('list');const keep=list.scrollTop;const atTop=keep<5;
+  const vis=order.filter(n=>passes(X[n]));
+  // virtualize crudely: render newest 300
+  const shown=vis.slice(-300).reverse();
+  $('rows').innerHTML=shown.map(n=>rowHTML(X[n])).join('');
+  if(!atTop&&sel!=null){list.scrollTop=keep}
+  $('dropped').textContent=dropped?`${dropped} older exchanges dropped`:'';
+}
+$('rows').onclick=e=>{const r=e.target.closest('.row');if(r){following=false;selectEx(+r.dataset.n)}};
+function selectEx(n,auto){sel=n;if(!auto)following=false;renderList();renderDetail();const r=document.querySelector(`.row[data-n="${n}"]`);if(r&&!auto)r.scrollIntoView({block:'nearest'})}
+document.addEventListener('keydown',e=>{if(/INPUT|SELECT|TEXTAREA/.test(e.target.tagName))return;
+  const vis=order.filter(n=>passes(X[n]));let i=vis.indexOf(sel);
+  if(e.key==='ArrowUp'||e.key==='k'){e.preventDefault();if(i<vis.length-1)selectEx(vis[i+1])}
+  else if(e.key==='ArrowDown'||e.key==='j'){e.preventDefault();if(i>0)selectEx(vis[i-1])}
+  else if(e.key==='Escape'){following=true;if(vis.length)selectEx(vis[vis.length-1],true)}});
+// auto-follow newest if user hasn't picked
+function maybeFollow(){if(following&&order.length){const v=order.filter(n=>passes(X[n]));if(v.length&&v[v.length-1]!==sel){sel=v[v.length-1]}}}
+const _flush=flush;
+// ---------- rendering: detail ----------
+const mdOn=new WeakMap();
+function sizeInfo(s){const l=s.split('\n').length;return `${l} lines · ${s.length} chars · ~${tok(Math.ceil(s.length/4))} tok`}
+function mdRender(s){ // tiny sanitized markdown
+  let h=esc(s).replace(/```(\w*)\n([\s\S]*?)```/g,'<pre>$2</pre>').replace(/`([^`\n]+)`/g,'<code>$1</code>')
+   .replace(/^### (.*)$/gm,'<h4>$1</h4>').replace(/^## (.*)$/gm,'<h3>$1</h3>').replace(/^# (.*)$/gm,'<h2>$1</h2>')
+   .replace(/\*\*([^*\n]+)\*\*/g,'<b>$1</b>').replace(/^[-*] (.*)$/gm,'• $1');
+  return `<div style="white-space:pre-wrap">${h}</div>`}
+let idc=0;const store={};
+function textBlock(s,opts={}){
+  s=str(s);const id='t'+(idc++);store[id]=s;const lines=s.split('\n');
+  const long=lines.length>15||s.length>1500;
+  const head=long?lines.slice(0,8).join('\n').slice(0,800):s;
+  const md=opts.md?`<button class="s" data-md="${id}">Markdown</button>`:'';
+  return `<div class="tb" id="${id}" data-collapsed="${long?1:0}"><pre>${esc(head)}${long?'\n…':''}</pre>${long?`<button class="s" data-more="${id}">show all (${lines.length} lines)</button>`:''}<button class="s" data-copy="${id}">copy</button>${md}<span class="mut"> ${sizeInfo(s)}</span></div>`}
+function jsonHTML(v,depth=0){
+  if(v===null)return '<span class="jn">null</span>';
+  if(typeof v==='string'){ if(v.length>200||v.includes('\n'))return `<span class="js">"${esc(v.length>1500?v.slice(0,1500)+'… ['+v.length+' chars]':v)}"</span>`;return `<span class="js">"${esc(v)}"</span>`}
+  if(typeof v!=='object')return `<span class="jn">${esc(v)}</span>`;
+  const isA=Array.isArray(v),keys=Object.keys(v);if(!keys.length)return isA?'[]':'{}';
+  const inner=keys.map(k=>`<div style="margin-left:16px">${isA?'':`<span class="jk">"${esc(k)}"</span>: `}${jsonHTML(v[k],depth+1)}</div>`).join('');
+  return `<details ${depth<2?'open':''} style="border:0;margin:0;background:none"><summary style="background:none;padding:0;font-weight:400;display:inline">${isA?'[':'{'} ${keys.length}</summary>${inner}${isA?']':'}'}</details>`}
+function jsonBlock(v){const id='t'+(idc++);store[id]=JSON.stringify(v,null,2);return `<div class="tb"><pre>${jsonHTML(v)}</pre><button class="s" data-copy="${id}">copy JSON</button></div>`}
+function sec(title,summary,body,color,open,extra=''){return `<details ${open?'open':''} style="--c:${color}" ${extra}><summary style="color:${color}">${title}<span class="sm">${summary}</span></summary><div class="body">${body}</div></details>`}
+function blockHTML(b,x,role){
+  if(typeof b==='string')b={type:'text',text:b};
+  switch(b.type){
+    case'text':return `<div class="blk" style="--c:var(--${role==='assistant'?'ast':'usr'})"><div class="t">${role} text${b.cache_control?' · cache_control':''}</div>${textBlock(b.text,{md:1})}</div>`;
+    case'thinking':return `<details class="blk" style="--c:var(--thk)"><summary>thinking<span class="sm">${(b.thinking||'').length} chars</span></summary>${textBlock(b.thinking||'',{md:1})}</details>`;
+    case'redacted_thinking':return `<div class="blk" style="--c:var(--thk)"><div class="t">redacted thinking</div></div>`;
+    case'tool_use':{const r=x?findResult(b.id,x):null;
+      const res=r?`<div><a class="lnk" data-go="${r.y.n}">→ result in #${r.y.n}</a>${resultHTML(r.b,r.y,true)}</div>`:`<div class="mut blk">${x&&x.done?'waiting for result…':'…'}</div>`;
+      return `<div class="pair"><div class="blk" style="--c:var(--tool)"><div class="t">tool_use · ${esc(b.name)} <span class="mut">${esc(b.id||'')}</span></div>${jsonBlock(b.input)}</div>${res}</div>`}
+    case'tool_result':return resultHTML(b,x,false);
+    case'image':return `<div class="blk"><div class="t">image</div><span class="mut">${esc(b.source&&b.source.media_type||'')} ${b.source&&b.source.data?b.source.data.length+' b64 chars':''}</span></div>`;
+    case'document':return `<div class="blk"><div class="t">document</div>${jsonBlock({...b,source:b.source&&{...b.source,data:b.source.data?'['+b.source.data.length+' chars]':undefined}})}</div>`;
+    default:return `<div class="blk"><div class="t">${esc(b.type||'block')}</div>${jsonBlock(b)}</div>`}
+}
+function resultHTML(b,x,inline){
+  const c=b.content;let body;
+  if(typeof c==='string')body=textBlock(c);else if(Array.isArray(c))body=c.map(y=>y.type==='text'?textBlock(y.text):blockHTML(y,null,'user')).join('');else body=textBlock(c==null?'':c);
+  const call=!inline&&x?findCall(b.tool_use_id,x):null;
+  return `<div class="blk" style="--c:${b.is_error?'var(--err)':'var(--tool)'}"><div class="t">tool_result ${b.is_error?'<span class="err">✖ error</span>':'<span class="ok">✓</span>'}${call?` ← ${esc(call.b.name)} <a class="lnk" data-go="${call.y.n}">(call in #${call.y.n})</a>`:''}</div>${body}</div>`}
+function contentHTML(m,x){const c=m.content;if(typeof c==='string')return blockHTML({type:'text',text:c},x,m.role);return c.map(b=>blockHTML(b,x,m.role)).join('')}
+function msgHTML(m,i,x){return `<div style="margin:6px 0"><span class="mut">[${i}] ${m.role}</span>${contentHTML(m,x)}</div>`}
+function sysText(s){return typeof s==='string'?s:Array.isArray(s)?s.map(b=>b.text||'').join('\n'):''}
+function lineDiff(a,b){a=a.split('\n');b=b.split('\n');const sa=new Set(a),sb=new Set(b);
+  return a.filter(l=>!sb.has(l)).map(l=>`<div class="diffd">- ${esc(l)}</div>`).join('')+b.filter(l=>!sa.has(l)).map(l=>`<div class="diffa">+ ${esc(l)}</div>`).join('')}
+function changesHTML(x){
+  const p=x.prev,b=x.req.body;if(!p){return x.conv.branch?`<div class="warn">⚠ ${esc(x.conv.branch)} — history was rewritten (e.g. compaction)</div>`:'<span class="mut">First request in this conversation.</span>'}
+  const pb=p.req.body;let h=[];
+  const added=b.messages.length-pb.messages.length;
+  h.push(`<div>+${added} messages since #${p.n} (incl. previous reply)</div>`);
+  if(x.conv.branch&&x.conv.exs[0]===x.n)h.push(`<div class="warn">⚠ ${esc(x.conv.branch)}</div>`);
+  const s1=sysText(pb.system),s2=sysText(b.system);if(s1!==s2)h.push(`<div class="warn">System prompt changed:</div><pre>${lineDiff(s1,s2)}</pre>`);
+  const t1=Object.fromEntries((pb.tools||[]).map(t=>[t.name,strip(t)])),t2=Object.fromEntries((b.tools||[]).map(t=>[t.name,strip(t)]));
+  const ta=Object.keys(t2).filter(k=>!(k in t1)),tr=Object.keys(t1).filter(k=>!(k in t2)),tc=Object.keys(t2).filter(k=>k in t1&&t1[k]!==t2[k]);
+  if(ta.length)h.push(`<div>Tools added: ${esc(ta.join(', '))}</div>`);if(tr.length)h.push(`<div>Tools removed: ${esc(tr.join(', '))}</div>`);if(tc.length)h.push(`<div>Tools changed: ${esc(tc.join(', '))}</div>`);
+  for(const k of Object.keys({...pb,...b}))if(!['messages','system','tools'].includes(k)&&strip(pb[k])!==strip(b[k]))h.push(`<div>Parameter <b>${esc(k)}</b>: ${esc(strip(pb[k])||'—')} → ${esc(strip(b[k])||'—')}</div>`);
+  return h.join('');
+}
+function renderDetail(){
+  const x=X[sel];const d=$('detail');if(!x){return}
+  const open={};d.querySelectorAll('details[data-k]').forEach(e=>open[e.dataset.k]=e.open);
+  const sc=d.scrollTop;
+  let h='';
+  const u=x.usage||{};
+  const hdr=`<h3 style="margin:0 0 6px">#${x.n} · ${esc(x.req.method)} ${esc(x.req.path)} · ${esc(x.model||'')} · ${x.status??'…'} ${x.dur!=null?'· '+x.dur.toFixed(1)+'s':''} ${x.msg?`· in ${tok((u.input_tokens||0)+(u.cache_read_input_tokens||0)+(u.cache_creation_input_tokens||0))} / out ${tok(u.output_tokens||0)} tok · cache r ${u.cache_read_input_tokens||0} w ${u.cache_creation_input_tokens||0}`:''} ${x.conv?`· <span style="color:${x.conv.color}">${x.conv.label}</span>`:''}</h3>`;
+  h+=hdr;
+  if(x.err)h+=`<div class="err">✖ ${esc(x.err)}</div>`;
+  if(x.status>=400)h+=`<div class="err">✖ HTTP ${x.status}</div>`;
+  if(x.streamErr)h+=`<div class="err">✖ ${esc(x.streamErr)}</div>`;
+  if(x.stop==='max_tokens')h+=`<div class="warn">⚠ stop_reason: max_tokens</div>`;
+  const O=(k,def)=>open[k]!==undefined?open[k]:def;
+  const tag=k=>`data-k="${k}"`;
+  if(x.msg){
+    const b=x.req.body,msgs=b.messages;
+    h+=sec('Changes',x.prev?`since #${x.prev.n}`:'',changesHTML(x),'var(--warn)',O('chg',!!(x.prev||x.conv.branch)),tag('chg'));
+    const st=sysText(b.system);
+    h+=sec('System',st?sizeInfo(st):'none',Array.isArray(b.system)?b.system.map(s=>`<div class="blk" style="--c:var(--sys)">${s.cache_control?'<div class="t">cache_control '+esc(JSON.stringify(s.cache_control))+'</div>':''}${textBlock(s.text||'',{md:1})}</div>`).join(''):textBlock(st,{md:1}),'var(--sys)',O('sys',false),tag('sys'));
+    const tools=b.tools||[];
+    h+=sec('Tools',tools.length+' tools',tools.map(t=>`<details style="--c:var(--tool)"><summary>${esc(t.name)}<span class="sm">${esc((t.description||'').split('\n')[0].slice(0,100))}</span></summary><div class="body">${textBlock(t.description||'')}${jsonBlock(t.input_schema)}</div></details>`).join(''),'var(--tool)',O('tools',false),tag('tools'));
+    const pm={...b};delete pm.messages;delete pm.system;delete pm.tools;
+    h+=sec('Parameters',esc(Object.keys(pm).join(', ')),jsonBlock(pm),'var(--mut)',O('par',false),tag('par'));
+    const pn=x.prev?x.prev.req.body.messages.length+1:0; // + prev reply
+    const split=Math.min(Math.max(pn,0),msgs.length-1);
+    const start=x.prev?split:msgs.length-1;
+    const before=msgs.slice(0,start),neu=msgs.slice(start);
+    h+=sec('Conversation so far',before.length+' msgs',before.map((m,i)=>msgHTML(m,i,x)).join(''),'var(--usr)',O('conv',false),tag('conv'));
+    h+=sec('New message',neu.length+' msg'+(neu.length>1?'s':''),neu.map((m,i)=>msgHTML(m,start+i,x)).join(''),'var(--usr)',O('new',true),tag('new'));
+    h+=sec('Reply',(x.stop?'stop: '+esc(x.stop):x.done?'':'streaming…'),x.done||x.sse?((x.reply||replyContent(x)).map(bl=>blockHTML(bl,x,'assistant')).join('')||(x.status>=400?`<pre>${esc(x.rawReply)}</pre>`:'<span class="mut">no content</span>')):'<span class="mut">waiting…</span>','var(--ast)',O('rep',true),tag('rep'));
+  } else {
+    h+=sec('Request','',x.req.body?jsonBlock(x.req.body):textBlock(x.req.body_text||''),'var(--usr)',true,tag('rq'));
+    h+=sec('Reply',String(x.status??''),textBlock(prettyMaybe(x.rawReply)),'var(--ast)',true,tag('rp'));
+  }
+  h+=sec('Raw','request / reply',`<b>Request headers</b>${jsonBlock(x.req.headers)}<b>Request body</b>${x.req.body?jsonBlock(x.req.body):textBlock(x.req.body_text||'')}<b>Reply (raw)</b>${textBlock(x.rawReply)}`,'var(--mut)',O('raw',false),tag('raw'));
+  d.innerHTML=h;d.scrollTop=sc;
+}
+function prettyMaybe(s){try{return JSON.stringify(JSON.parse(s),null,2)}catch{return s}}
+$('detail').onclick=e=>{const t=e.target;
+  if(t.dataset.go){following=false;selectEx(+t.dataset.go);return}
+  if(t.dataset.copy){navigator.clipboard&&navigator.clipboard.writeText(store[t.dataset.copy])}
+  if(t.dataset.more){const id=t.dataset.more,box=$(id);const c=box.dataset.collapsed==='1';box.querySelector('pre').textContent=c?store[id]:store[id].split('\n').slice(0,8).join('\n').slice(0,800)+'\n…';box.dataset.collapsed=c?0:1;t.textContent=c?'collapse':'show all'}
+  if(t.dataset.md){const id=t.dataset.md,box=$(id);const pre=box.querySelector('pre,.mdv');if(pre.tagName==='PRE'){const d=document.createElement('div');d.className='mdv';d.innerHTML=mdRender(store[id]);pre.replaceWith(d)}else{const p=document.createElement('pre');p.textContent=store[id];pre.replaceWith(p)}}
+};
+// ---------- filters ----------
+function refreshFilters(){
+  const fill=(id,vals)=>{const s=$(id),cur=s.value,have=[...s.options].map(o=>o.value);
+    vals.filter(v=>!have.includes(v)).forEach(v=>s.add(new Option(v,v)));s.value=cur};
+  const tools=new Set(),models=new Set(),cl=new Set();
+  for(const n of order){const x=X[n];if(x.model)models.add(x.model);toolsCalled(x).forEach(b=>tools.add(b.name));if(x.conv)cl.add(x.conv.label)}
+  fill('fTool',[...tools]);fill('fModel',[...models]);
+  const s=$('fConv'),cur=s.value;s.length=1;[...cl].sort().forEach(v=>s.add(new Option(v,v)));s.value=cur;
+}
+['fTool','fStat','fModel','fConv','fText','fHide'].forEach(id=>$(id).addEventListener('input',()=>{listDirty=true;if(!passes(X[sel]||{req:{path:''},msg:0}))following=true;flush()}));
+$('errc').onclick=()=>{$('fStat').value='err';listDirty=true;flush()};
+$('pause').onclick=()=>{paused=!paused;$('pause').textContent=paused?'▶ Resume':'⏸ Pause';$('live').textContent=paused?'⏸ Paused':'● Live';if(!paused){listDirty=true;order.forEach(n=>dirty.add(n));flush()}};
+$('clear').onclick=()=>{fetch('/__dashboard/clear',{method:'POST'}).catch(()=>{});resetAll()};
+function resetAll(){for(const k in X)delete X[k];order=[];convs=[];sel=null;following=true;dropped=0;listDirty=true;$('detail').innerHTML='';flush()}
+// divider
+$('div').onmousedown=e=>{const mv=ev=>{$('list').style.width=Math.max(200,ev.clientX)+'px'};const up=()=>{removeEventListener('mousemove',mv);removeEventListener('mouseup',up)};addEventListener('mousemove',mv);addEventListener('mouseup',up)};
+// ---------- SSE ----------
+let dropped=0,es;
+function connect(){
+  es=new EventSource('/__dashboard/events');
+  es.onopen=()=>{$('banner').style.display='none'};
+  es.onmessage=m=>{const ev=JSON.parse(m.data);
+    if(ev.type==='hello'){dropped=ev.dropped;return}
+    if(ev.type==='cleared'){resetAll();return}
+    const wasNew=!X[ev.ex];onEvent(ev);
+    if(following)sel=order[order.length-1];
+    if(wasNew&&!following&&$('list').scrollTop>5){const nb=$('newb');nb.style.display='block';nb.textContent=(++newCount)+' new ↑'}};
+  es.onerror=()=>{$('banner').style.display='block'};
+}
+let newCount=0;
+$('newb').onclick=()=>{newCount=0;$('newb').style.display='none';$('list').scrollTop=0};
+$('list').onscroll=()=>{if($('list').scrollTop<5){newCount=0;$('newb').style.display='none'}};
+connect();
+</script></body></html>
