@@ -121,7 +121,9 @@ function relabel(){
 // ---------- derived ----------
 function toolsCalled(x){return (x.reply||[]).filter(b=>b.type==='tool_use')}
 function resultsIn(x){const o=[];if(!x.msg)return o;for(const m of x.req.body.messages)if(Array.isArray(m.content))for(const b of m.content)if(b.type==='tool_result')o.push(b);return o}
-function toolErrIn(x){return resultsIn(x).some(b=>b.is_error)}
+// Only tool_results new in THIS request (last message) count; earlier ones are replayed history.
+function newResultsIn(x){if(!x.msg)return[];const ms=x.req.body.messages,m=ms[ms.length-1];return m&&m.role==='user'&&Array.isArray(m.content)?m.content.filter(b=>b&&b.type==='tool_result'):[]}
+function toolErrIn(x){return newResultsIn(x).some(b=>b.is_error===true)}
 function isErr(x){return x.err||x.streamErr||(x.status&&x.status>=400)}
 function findResult(id,x){ // result for tool_use id, searching later exs in same conv
   if(!x.conv)return null;const i=x.conv.exs.indexOf(x.n);
@@ -233,7 +235,7 @@ function resultHTML(b,x,inline){
   const c=b.content;let body;
   if(typeof c==='string')body=textBlock(c);else if(Array.isArray(c))body=c.map(y=>y.type==='text'?textBlock(y.text):blockHTML(y,null,'user')).join('');else body=textBlock(c==null?'':c);
   const call=!inline&&x?findCall(b.tool_use_id,x):null;
-  return `<div class="blk" style="--c:${b.is_error?'var(--err)':'var(--tool)'}"><div class="t">tool_result ${b.is_error?'<span class="err">✖ error</span>':'<span class="ok">✓</span>'}${call?` ← ${esc(call.b.name)} <a class="lnk" data-go="${call.y.n}">(call in #${call.y.n})</a>`:''}</div>${body}</div>`}
+  return `<div class="blk" style="--c:${b.is_error===true?'var(--err)':'var(--tool)'}"><div class="t">tool_result ${b.is_error===true?'<span class="err">✖ error</span>':'<span class="ok">✓</span>'}${call?` ← ${esc(call.b.name)} <a class="lnk" data-go="${call.y.n}">(call in #${call.y.n})</a>`:''}</div>${body}</div>`}
 function contentHTML(m,x){const c=m.content;if(typeof c==='string')return blockHTML({type:'text',text:c},x,m.role);return c.map(b=>blockHTML(b,x,m.role)).join('')}
 function msgHTML(m,i,x){return `<div style="margin:6px 0"><span class="mut">[${i}] ${m.role}</span>${contentHTML(m,x)}</div>`}
 function sysText(s){return typeof s==='string'?s:Array.isArray(s)?s.map(b=>b.text||'').join('\n'):''}
